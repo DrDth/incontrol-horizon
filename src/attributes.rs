@@ -199,6 +199,23 @@ pub const SPAWN: &[(&str, Kind, bool)] = &[
     ("nodespawn", Kind::Boolean, false),
 ];
 
+/// `PhaseRule`'s factory: the conditions of a phase in `phases.json`.
+pub const PHASES: &[(&str, Kind, bool)] = &[
+    ("kubejs", Kind::Json, true),
+    ("time", Kind::String, false),
+    ("mintime", Kind::Integer, false),
+    ("maxtime", Kind::Integer, false),
+    ("daycount", Kind::Object, false),
+    ("mindaycount", Kind::Integer, false),
+    ("maxdaycount", Kind::Integer, false),
+    ("weather", Kind::String, false),
+    ("winter", Kind::Boolean, false),
+    ("summer", Kind::Boolean, false),
+    ("spring", Kind::Boolean, false),
+    ("autumn", Kind::Boolean, false),
+    ("state", Kind::String, false),
+];
+
 /// A rule's attributes, in the factory's order, each until a check or action consumes it.
 #[derive(Debug, Default)]
 pub struct AttributeMap {

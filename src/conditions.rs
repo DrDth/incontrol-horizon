@@ -4,6 +4,7 @@ use mod_api::{EntityRef, Host, LevelRef, LightLayer, SpawnReason, UnspawnedMobRe
 
 use crate::attributes::{Attr, AttributeMap};
 use crate::counts::{CountInfo, RuleCache, namespace};
+use crate::data::DataStorage;
 use crate::expression::{self, Expression};
 use crate::json;
 
@@ -23,7 +24,8 @@ pub struct Query<'a> {
     /// `getPos`.
     pub pos: [i32; 3],
     pub kind: &'a str,
-    pub subject: Subject,
+    /// None for a phase rule, which asks about the world alone.
+    pub subject: Option<Subject>,
     /// The spawn's reason, for spawn checks and finalization.
     pub reason: Option<SpawnReason>,
     /// Whether the event's world is a `Level`: false for chunk generation, which asks with its
@@ -38,6 +40,8 @@ pub struct Context<'a> {
     /// `Config.PERPLAYER_RADIUS`.
     pub radius: i32,
     pub random: &'a mut Random,
+    /// The world's day counter, phases and numbers.
+    pub data: &'a DataStorage,
 }
 
 /// `java.util.Random`'s place in `addRandomCheck`: any fair draw.
@@ -113,6 +117,10 @@ enum Check {
     Mobs { ids: Vec<String>, tags: Vec<String> },
     MinCount(CountInfo),
     MaxCount(CountInfo),
+    Number { name: String, test: Expression },
+    DayCount(Expression),
+    MinDayCount(i32),
+    MaxDayCount(i32),
 }
 
 /// `MobSpawnType.valueOf`, by the 1.21.1 names the rule files use.
@@ -312,6 +320,12 @@ impl Evaluator {
             checks.push(Check::AnyScoreboardTags(strings(list)));
         }
         map.consume("when");
+        map.consume_list("phase");
+        if let Some(text) = map.consume("number")
+            && let Some(check) = number_check(text.str(), errors)?
+        {
+            checks.push(check);
+        }
         if asked == Asked::InLevel
             && let Some(b) = map.consume("baby")
         {
@@ -380,6 +394,18 @@ impl Evaluator {
                 Check::MaxCount(info)
             });
         }
+        // `daycount` is read as text, so a plain number is no expression and makes no check.
+        if let Some(d) = map.consume("daycount")
+            && let Some(e) = expression(d.str(), errors)?
+        {
+            checks.push(Check::DayCount(e));
+        }
+        if let Some(d) = map.consume("mindaycount") {
+            checks.push(Check::MinDayCount(d.int()));
+        }
+        if let Some(d) = map.consume("maxdaycount") {
+            checks.push(Check::MaxDayCount(d.int()));
+        }
         Ok(Evaluator { checks })
     }
 
@@ -387,6 +413,32 @@ impl Evaluator {
     pub fn matches(&self, query: &Query<'_>, ctx: &mut Context<'_>) -> bool {
         self.checks.iter().all(|c| test(c, query, ctx))
     }
+}
+
+/// `TestingTools.parseNumberCheck`: `{"name": ..., "expression": ...}`.
+fn number_check(text: &str, errors: &mut Vec<String>) -> Result<Option<Check>, String> {
+    let serde_json::Value::Object(o) = json::parse_value(text)? else {
+        errors.push("Number check needs to be an object!".to_owned());
+        return Ok(None);
+    };
+    let (Some(name), Some(e)) = (o.get("name"), o.get("expression")) else {
+        let missing = if o.contains_key("name") {
+            "expression"
+        } else {
+            "name"
+        };
+        errors.push(format!("Number check needs to have a '{missing}' field!"));
+        return Ok(None);
+    };
+    let e = json::as_string(e)?;
+    let Some(test) = expression::parse(&e)? else {
+        errors.push(format!("Unknown expression '{e}'!"));
+        return Ok(None);
+    };
+    Ok(Some(Check::Number {
+        name: json::as_string(name)?,
+        test,
+    }))
 }
 
 /// `TestingTools.isChunkInvalid`: the chunk at `pos` isn't loaded in full.
@@ -456,7 +508,7 @@ fn full_light(query: &Query<'_>, ctx: &Context<'_>) -> Option<i32> {
 
 /// The scoreboard tags of a living subject.
 fn tags(query: &Query<'_>, ctx: &Context<'_>) -> Option<Vec<String>> {
-    match query.subject {
+    match query.subject? {
         Subject::Unspawned(mob) => mob.tags(ctx.host).ok(),
         Subject::Entity(e) => {
             ctx.host.living(e)?;
@@ -532,12 +584,16 @@ fn test(check: &Check, query: &Query<'_>, ctx: &mut Context<'_>) -> bool {
             tags(query, ctx).is_some_and(|have| have.iter().any(|t| want.contains(t)))
         }
         Check::Baby(want) => match query.subject {
-            Subject::Entity(e) => host
+            Some(Subject::Entity(e)) => host
                 .living(e)
                 .and_then(|l| l.baby(host))
                 .is_some_and(|b| b == *want),
-            Subject::Unspawned(_) => false,
+            _ => false,
         },
+        Check::Number { name, test } => test.test(ctx.data.number(name)),
+        Check::DayCount(e) => e.test(ctx.data.day_counter()),
+        Check::MinDayCount(min) => ctx.data.day_counter() >= *min,
+        Check::MaxDayCount(max) => ctx.data.day_counter() < *max,
         Check::Spawner(want) => (query.reason == Some(SpawnReason::Spawner)) == *want,
         Check::SpawnType(reasons) => query.reason.is_some_and(|r| reasons.contains(&r)),
         Check::Mobs { ids, tags } => {

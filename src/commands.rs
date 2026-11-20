@@ -12,13 +12,19 @@ const ROOTS: [&str; 2] = ["incontrol", "ctrl"];
 
 /// Every usage, with the permission level each subcommand requires.
 pub fn usages() -> Vec<Command> {
-    let rest: [(&str, u8); 6] = [
+    let rest: [(&str, u8); 12] = [
         ("kill <type:word>", 2),
         ("reload", 1),
         ("showmobs", 0),
         ("showstats", 0),
         ("clearstats", 0),
         ("list", 2),
+        ("days [number:integer]", 2),
+        ("phases", 2),
+        ("numbers", 2),
+        ("setphase <phase:word>", 2),
+        ("setnumber <number:word> <value:integer>", 2),
+        ("clearphase <phase:word>", 2),
     ];
     ROOTS
         .iter()
@@ -43,6 +49,13 @@ pub enum Run {
     ShowStats,
     ClearStats,
     List,
+    /// `days`: shows the day counter, or sets it.
+    Days(Option<i32>),
+    Phases,
+    Numbers,
+    /// `setphase` (true) and `clearphase` (false).
+    SetPhase(String, bool),
+    SetNumber(String, i32),
 }
 
 /// What `command` asks for, None when it is no `/incontrol` usage.
@@ -64,8 +77,30 @@ pub fn parse(command: &CommandInvocation) -> Option<Run> {
         ["showstats"] => Run::ShowStats,
         ["clearstats"] => Run::ClearStats,
         ["list"] => Run::List,
+        ["days"] => Run::Days(integer(command, "number")),
+        ["phases"] => Run::Phases,
+        ["numbers"] => Run::Numbers,
+        ["setphase"] => Run::SetPhase(word(command, "phase")?, true),
+        ["clearphase"] => Run::SetPhase(word(command, "phase")?, false),
+        ["setnumber"] => Run::SetNumber(word(command, "number")?, integer(command, "value")?),
         _ => return None,
     })
+}
+
+/// The word argument `name`.
+fn word(command: &CommandInvocation, name: &str) -> Option<String> {
+    match command.argument(name)? {
+        CommandArgumentValue::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// The integer argument `name`.
+fn integer(command: &CommandInvocation, name: &str) -> Option<i32> {
+    match command.argument(name)? {
+        CommandArgumentValue::Integer(i) => Some(*i),
+        _ => None,
+    }
 }
 
 /// A line to the command's source.

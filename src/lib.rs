@@ -9,6 +9,7 @@ mod commands;
 mod conditions;
 mod config;
 mod counts;
+mod data;
 mod expression;
 mod json;
 mod rules;
@@ -27,6 +28,7 @@ use crate::commands::Run;
 use crate::conditions::{Context, Query, Random, Registry, Subject};
 use crate::config::Config;
 use crate::counts::{Census, RuleCache};
+use crate::data::DataStorage;
 use crate::rules::{Outcome, Rules, When};
 
 /// `Statistics`: how often each rule fired, by its place among the rules asked.
@@ -54,6 +56,8 @@ struct State {
     random: Random,
     /// `ErrorHandler.errors`: shown to every player who joins until the rules are reloaded.
     errors: Vec<String>,
+    /// `DataStorage`: the world's days, phases and numbers.
+    data: DataStorage,
 }
 
 #[derive(Default)]
@@ -113,8 +117,8 @@ impl InControl {
                     Config::default()
                 }
             });
-        let text =
-            ConfigPath::new(rules::SPAWN_FILE)
+        let text = |file: &str| {
+            ConfigPath::new(file)
                 .ok()
                 .and_then(|path| match files.read(&path) {
                     Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
@@ -123,14 +127,17 @@ impl InControl {
                         let _ = files.write(&path, b"[]");
                         None
                     }
-                });
+                })
+        };
+        let spawn = text(rules::SPAWN_FILE);
+        let phases = text(rules::PHASES_FILE);
         let known = entity_types(host);
         let is_known = |id: &str| known.contains(id);
         let registry = Registry {
             entity_type: &is_known,
         };
         let mut errors = Vec::new();
-        let rules = Rules::read(text.as_deref(), &registry, &mut errors);
+        let rules = Rules::read(spawn.as_deref(), phases.as_deref(), &registry, &mut errors);
         {
             let mut state = self.state.lock().unwrap();
             state.config = config.unwrap_or_default();
@@ -149,9 +156,10 @@ impl InControl {
             cache: &state.cache,
             radius: state.config.per_player_radius,
             random: &mut state.random,
+            data: &state.data,
         };
         let mut matched = Vec::new();
-        for (i, rule) in state.rules.at(when).enumerate() {
+        for (i, rule) in state.rules.at(when, state.data.phases()).enumerate() {
             if rule.matches(query, &mut ctx) {
                 matched.push((i, rule.result));
                 if !rule.keep_going {
@@ -168,6 +176,70 @@ impl InControl {
             let deny = matches!(outcome, Outcome::Deny | Outcome::DenyWithActions);
             state.stats.add(i, deny);
         }
+    }
+
+    /// `DataStorage.getData` when the world opens.
+    fn load_data(&self, host: &mut dyn ServerHost) {
+        let text = ConfigPath::new(data::FILE)
+            .ok()
+            .and_then(|path| host.world_data_files().read(&path).ok())
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        self.state.lock().unwrap().data = DataStorage::read(text.as_deref());
+    }
+
+    /// Writes the world's data when it changed (`setDirty`).
+    fn save_data(&self, host: &mut dyn ServerHost) {
+        let text = {
+            let mut state = self.state.lock().unwrap();
+            if !state.data.dirty {
+                return;
+            }
+            state.data.dirty = false;
+            state.data.write()
+        };
+        if let Ok(path) = ConfigPath::new(data::FILE) {
+            let _ = host.world_data_files().write(&path, text.as_bytes());
+        }
+    }
+
+    /// `DataStorage.tick` on the Overworld's tick: the day counter, and every 10 ticks the phase
+    /// rules.
+    fn tick_data(&self, host: &mut dyn ServerHost, level: LevelRef) {
+        let day_time = level.day_time(host);
+        let mut guard = self.state.lock().unwrap();
+        let state = &mut *guard;
+        if let Some(t) = day_time {
+            state.data.tick_time(t);
+        }
+        if state.data.phases_due() {
+            let query = Query {
+                level,
+                dimension: "minecraft:overworld",
+                pos: [0, 0, 0],
+                kind: "",
+                subject: None,
+                reason: None,
+                in_level: true,
+            };
+            let mut ctx = Context {
+                host,
+                cache: &state.cache,
+                radius: state.config.per_player_radius,
+                random: &mut state.random,
+                data: &state.data,
+            };
+            let results: Vec<(String, bool)> = state
+                .rules
+                .phases
+                .iter()
+                .map(|rule| (rule.name.clone(), rule.matches(&query, &mut ctx)))
+                .collect();
+            for (name, on) in results {
+                state.data.set_phase(&name, on);
+            }
+        }
+        drop(guard);
+        self.save_data(host);
     }
 
     /// `performCount` for `level`, when it is due.
@@ -227,6 +299,57 @@ impl InControl {
     fn run(&self, host: &mut dyn ServerHost, source: &mod_api::CommandSource, what: Run) {
         match what {
             Run::ShowStats => self.show_stats(host),
+            Run::Days(days) => {
+                let line = {
+                    let mut state = self.state.lock().unwrap();
+                    match days {
+                        Some(days) => {
+                            state.data.set_day_counter(days);
+                            None
+                        }
+                        None => Some(format!("Current day is {}", state.data.day_counter())),
+                    }
+                };
+                if let Some(line) = line {
+                    commands::send(host, Text::literal(line));
+                }
+                self.save_data(host);
+            }
+            Run::Phases => {
+                let line = {
+                    let state = self.state.lock().unwrap();
+                    let phases: String = state
+                        .data
+                        .phases()
+                        .iter()
+                        .map(|p| format!("{p} "))
+                        .collect();
+                    format!("Current phases: {phases}")
+                };
+                commands::send(host, Text::literal(line));
+            }
+            Run::Numbers => {
+                let line = {
+                    let state = self.state.lock().unwrap();
+                    // Java's `Map.toString`.
+                    let numbers: Vec<String> = state
+                        .data
+                        .numbers()
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect();
+                    format!("Current numbers: {{{}}}", numbers.join(", "))
+                };
+                commands::send(host, Text::literal(line));
+            }
+            Run::SetPhase(phase, on) => {
+                self.state.lock().unwrap().data.set_phase(&phase, on);
+                self.save_data(host);
+            }
+            Run::SetNumber(name, value) => {
+                self.state.lock().unwrap().data.set_number(&name, value);
+                self.save_data(host);
+            }
             Run::ClearStats => self.state.lock().unwrap().stats = Statistics::default(),
             Run::ShowMobs => {
                 if commands::player(host, source).is_none() {
@@ -272,6 +395,7 @@ fn living_mob(host: &dyn Host, entity: mod_api::EntityRef, kind: &str) -> bool {
 #[mod_api::horizon_mod]
 impl Hooks for InControl {
     fn server_started(&self, host: &mut dyn ServerHost, _: &mut ServerStartedEvent) {
+        self.load_data(host);
         self.load(host);
     }
 
@@ -306,6 +430,9 @@ impl Hooks for InControl {
         // `onWorldTick`: the counts, on the server.
         if let HostSide::Server(host) = host {
             self.count(host, event.level);
+            if event.level.dimension().id(host).as_deref() == Some("minecraft:overworld") {
+                self.tick_data(host, event.level);
+            }
         }
     }
 
@@ -340,7 +467,7 @@ impl Hooks for InControl {
             dimension: event.dimension,
             pos,
             kind: event.kind,
-            subject: Subject::Entity(entity),
+            subject: Some(Subject::Entity(entity)),
             reason: None,
             in_level: true,
         };
@@ -375,7 +502,7 @@ impl Hooks for InControl {
             dimension: event.dimension,
             pos,
             kind: event.kind,
-            subject: Subject::Unspawned(event.mob),
+            subject: Some(Subject::Unspawned(event.mob)),
             reason: Some(event.reason),
             in_level: event.reason != SpawnReason::ChunkGeneration,
         };
@@ -400,7 +527,7 @@ impl Hooks for InControl {
             dimension: event.dimension,
             pos,
             kind: event.kind,
-            subject: Subject::Unspawned(event.mob),
+            subject: Some(Subject::Unspawned(event.mob)),
             reason: Some(event.reason),
             in_level: event.reason != SpawnReason::ChunkGeneration,
         };
@@ -429,7 +556,7 @@ impl Hooks for InControl {
             dimension: event.dimension,
             pos,
             kind: event.kind,
-            subject: Subject::Entity(event.mob.entity()),
+            subject: Some(Subject::Entity(event.mob.entity())),
             reason: None,
             in_level: true,
         };

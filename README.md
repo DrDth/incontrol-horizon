@@ -26,9 +26,17 @@ This part carries these conditions:
   `perchunk`. Every level's mobs are counted again every `cacheRetentionTicks` and followed as they join and leave
   in between, so a cap holds exactly, also when a spawner places several mobs at once.
 - `scoreboardtags_all`, `scoreboardtags_any`.
+- The world's state: `phase` (the rule is asked only while all its phases are on), `number` (a named number
+  tested by an expression), `daycount`, `mindaycount`, `maxdaycount`.
+
+Phases come from `config/incontrol/phases.json`: each names a phase and the conditions (`time`, `mintime`,
+`maxtime`, `daycount`, `mindaycount`, `maxdaycount`, `weather`) under which it is on, asked every 10 ticks. The day
+counter goes up each morning. Days, phases and numbers are kept with the world, in its
+`horizon-mod-data/incontrol/data.json`.
 
 `/incontrol` (or `/ctrl`) has `reload`, `list` (the mobs of your level by type), `kill <type>` (`all` or a type id),
-`showstats` and `clearstats` (how often each rule fired), and `showmobs`.
+`showstats` and `clearstats` (how often each rule fired), `showmobs`, `days [number]`, `phases`, `setphase`,
+`clearphase`, `numbers` and `setnumber <name> <value>`.
 
 The settings `cacheRetentionTicks` and `perPlayerRadius` live in `config/incontrol-server.toml`.
 
@@ -42,12 +50,12 @@ with actions in it, since it never runs them.
 - `seesky` and `cave` (`canSeeSkyFromBelowWater`), `baby` for `position` and `finalize`, `canspawnhere` and
   `notcolliding`: likewise.
 - `block`, `blocktest`, `blockoffset`, `structure`, `structuretags`, `hasstructure`, the player's items (`helmet`,
-  `playerhelditem` and the rest), `area`, `phase`, `number`, `daycount`, `incontrol` and `eventspawn`.
+  `playerhelditem` and the rest), `area`, `incontrol` and `eventspawn`.
 - Every action: changing health, speed, damage, armor, equipment, potions, names or NBT, `message`, `command`,
   phases and numbers.
 - The other rule files: `loot.json`, `experience.json`, `effects.json`, `breakevents.json`, `placeevents.json`,
-  `rightclicks.json`, `leftclicks.json`, `phases.json`, `spawner.json`, `areas.json`, `events.json`.
-- `/incontrol debug`, `info`, `days`, `phases`, `numbers`, `area`, `setphase`, `clearphase`, `setnumber`.
+  `rightclicks.json`, `leftclicks.json`, `spawner.json`, `areas.json`, `events.json`.
+- `/incontrol debug`, `info`, `area`.
 
 ## Differences from the original
 
@@ -56,6 +64,8 @@ with actions in it, since it never runs them.
 - `showstats` and `showmobs` answer in chat; the original writes them to the server log, which a wasm mod has
   none of.
 - `random` draws from the mod's own generator, not Java's.
+- The world's data is JSON in `horizon-mod-data/incontrol/`, not the original's `data/InControlData.dat`, so a world
+  brought over from Java starts with day 0 and no phases or numbers.
 - Conditions on mods Horizon doesn't have (Serene Seasons, Game Stages, The Lost Cities, Baubles, EnigmaScript)
   add no check, as the original does when those mods are missing. `kubejs` reports that KubeJS isn't loaded and
   never matches, and `npc` never matches.
